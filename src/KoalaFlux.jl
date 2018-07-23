@@ -76,20 +76,29 @@ FluxPredictorType = Tuple{Vector{EmbType},Flux.Chain}
 mutable struct FluxRegressor <: Regressor{FluxPredictorType}
     network_creator::Function
     dimension_formula::Function
-    η::Float64
+    learning_rate::Float64
+    lambda::Float64
+    alpha::Float64 
     n::Int
 end
 
 # keyword constructor:
 function FluxRegressor(; network_creator=default_creator,
                        dimension_formula=default_formula,
-                       η=0.03, n=1)
-    model = FluxRegressor(network_creator, dimension_formula, η, n)
+                       lambda = 0.1, alpha=0.0, learning_rate=0.03, n=1)
+    model = FluxRegressor(network_creator, dimension_formula, learning_rate, lambda, alpha, n)
     softwarn(clean!(model)) 
     return model
 end
 
-clean!(model::FluxRegressor) = ""
+function clean!(model::FluxRegressor)
+    message = ""
+    if model.alpha > 1 || model.alpha < 0
+        message = message*"alpha must be in range [0, 1]. Resetting to 0.0. "
+        model.alpha = 0.0
+    end
+    return message
+end
 
 
 ## TRANSFORMERS
@@ -211,21 +220,22 @@ function fit(model::FluxRegressor, cache, add, parallel, verbosity; args...)
     train = 1:ntrain
 
     for eon in 1:model.n
-        
         scrambled_train = StatsBase.sample(train, ntrain, replace=false)
-        count = 0
-        sum = 0.0
         for i in scrambled_train
             ordinals = cache.X.ordinal[:,i]
             nominals = cache.X.nominal[:,i]
             input_vector = x(cache.embedding, ordinals, nominals)
             l = rms(cache.chain(input_vector), cache.y[i])
+            l2_penalty = sum(vecnorm, chain_params) + sum(vecnorm, cache.embedding)
+            l1_penalty = sum(x->vecnorm(x, 1), chain_params) +
+                sum(x->vecnorm(x, 1), cache.embedding)
+            l += model.lambda*(model.alpha*l1_penalty + (1 - model.alpha)*l2_penalty)
             Flux.back!(l)
             for p in cache.embedding
-                Flux.Tracker.update!(p, -model.η*Flux.Tracker.grad(p))
+                Flux.Tracker.update!(p, -model.learning_rate*Flux.Tracker.grad(p))
             end
             for p in chain_params
-                Flux.Tracker.update!(p, -model.η*Flux.Tracker.grad(p))
+                Flux.Tracker.update!(p, -model.learning_rate*Flux.Tracker.grad(p))
             end
         end
     end
