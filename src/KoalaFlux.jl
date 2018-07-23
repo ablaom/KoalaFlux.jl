@@ -5,7 +5,7 @@ export FluxRegressor # eg, RidgeRegressor
 
 # needed in this module:
 import Koala: Regressor, Classifier, softwarn, BaseType, rms
-import Koala: supports_ensembling, Machine
+import Koala: supports_ensembling, Machine, SupervisedMachine
 import DataFrames: eltypes, AbstractDataFrame, head
 import KoalaTransforms: Transformer, TransformerMachine
 import KoalaTransforms: MakeCategoricalsIntTransformer, Standardizer
@@ -85,7 +85,7 @@ end
 # keyword constructor:
 function FluxRegressor(; network_creator=default_creator,
                        dimension_formula=default_formula,
-                       lambda = 0.1, alpha=0.0, learning_rate=0.03, n=1)
+                       lambda = 1e-5, alpha=0.0, learning_rate=0.03, n=1)
     model = FluxRegressor(network_creator, dimension_formula, learning_rate, lambda, alpha, n)
     softwarn(clean!(model)) 
     return model
@@ -108,8 +108,13 @@ struct FluxInput <: BaseType
     nominal::Matrix{Int}
 end
 
-Base.getindex(X::KoalaFlux.FluxInput, rows::AbstractVector{Int}, ::Colon) =
-    FluxInput(getindex(X.ordinal, :, rows), getindex(X.nominal, :, rows))
+function Base.getindex(X::KoalaFlux.FluxInput, rows::AbstractVector{Int}, ::Colon)
+    ordinal = isempty(X.ordinal) ? Array{Float64}(0, length(rows)) :
+        getindex(X.ordinal, :, rows)
+    nominal = isempty(X.nominal) ? Array{Int}(0, length(rows)) :
+        getindex(X.nominal, :, rows)
+    return FluxInput(ordinal, nominal)
+end
 
 struct FrameToFluxInputTransformerScheme <: BaseType
     make_categoricals_int_transformer_machine::TransformerMachine
@@ -226,9 +231,12 @@ function fit(model::FluxRegressor, cache, add, parallel, verbosity; args...)
             nominals = cache.X.nominal[:,i]
             input_vector = x(cache.embedding, ordinals, nominals)
             l = rms(cache.chain(input_vector), cache.y[i])
-            l2_penalty = sum(vecnorm, chain_params) + sum(vecnorm, cache.embedding)
-            l1_penalty = sum(x->vecnorm(x, 1), chain_params) +
-                sum(x->vecnorm(x, 1), cache.embedding)
+            l2_penalty = sum(vecnorm, chain_params)
+            l1_penalty = sum(x->vecnorm(x, 1), chain_params)
+            if !isempty(cache.embedding)
+                l2_penalty += sum(vecnorm, cache.embedding)
+                l1_penalty += sum(x->vecnorm(x, 1), cache.embedding)
+            end
             l += model.lambda*(model.alpha*l1_penalty + (1 - model.alpha)*l2_penalty)
             Flux.back!(l)
             for p in cache.embedding
@@ -265,6 +273,15 @@ function predict(model::FluxRegressor, predictor::FluxPredictorType,
 
     return predictions
 end
+
+
+## EXTRA HIGH-LEVEL API METHODS
+
+mutable struct EntityEmbedding <: Transformer
+    flux_machine::SupervisedMachine
+    features::Symbol
+end
+
 
 
         

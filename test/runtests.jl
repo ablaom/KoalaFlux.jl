@@ -1,4 +1,5 @@
-using Revise
+# addprocs()
+# using Revise
 using Koala
 using KoalaFlux
 using Base.Test
@@ -41,3 +42,15 @@ train, test = split(eachindex(y), 0.7)
 flux = FluxRegressor()
 fluxM = Machine(flux, X, y, train)
 fit!(fluxM, train)
+
+flux.n = 50
+
+u,v,w = @pcurve a linspace(0,1,8) l logspace(-8,-1,8) begin
+    flux.alpha = a; flux.lambda = l
+    fit!(fluxM)
+    er = err(fluxM, test, loss=rmsl)
+    @show a l er
+    er
+end
+
+    
