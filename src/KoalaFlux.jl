@@ -32,9 +32,8 @@ import Koala: transform, inverse_transform
 # encoding the embedding, called "embedding" below. Thus a Koala
 # `predictor` consists of a (chain, embedding) tuple.
 
-## HELPERS
 
-# supports_ensembling(model::FluxRegressor) = false
+## HELPERS
 
 Base.isempty(chain::Flux.Chain) = isempty(chain.layers)
 

@@ -43,14 +43,11 @@ flux = FluxRegressor()
 fluxM = Machine(flux, X, y, train)
 fit!(fluxM, train)
 
-flux.n = 50
+flux.n = 30
+flux.lambda = 1e-3
+fit!(fluxM, train)
+e_single = err(fluxM, train)
 
-u,v,w = @pcurve a linspace(0,1,8) l logspace(-8,-1,8) begin
-    flux.alpha = a; flux.lambda = l
-    fit!(fluxM)
-    er = err(fluxM, test, loss=rmsl)
-    @show a l er
-    er
-end
+using KoalaEnsembles
 
-    
+
