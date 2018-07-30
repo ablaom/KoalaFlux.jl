@@ -1,5 +1,4 @@
-# addprocs()
-# using Revise
+using Revise
 using Koala
 using KoalaFlux
 using Base.Test
@@ -40,14 +39,33 @@ embedding = [A1, A2]
 X, y = load_ames()
 train, test = split(eachindex(y), 0.7)
 flux = FluxRegressor()
+flux.n = 100
+flux.learning_rate = 0.002
 fluxM = Machine(flux, X, y, train)
 fit!(fluxM, train)
 
-flux.n = 30
-flux.lambda = 1e-3
-fit!(fluxM, train)
-e_single = err(fluxM, train)
+function get_creator(p)
+    function creator(n_inputs)
+        n_hidden = round(Int, sqrt(n_inputs))
+        return Flux.Chain(Flux.Dense(n_inputs, n_hidden, Flux.σ),
+                          Flux.Dropout(p), Flux.Dense(n_hidden, 1))
+    end
+    return creator
+end
 
-using KoalaEnsembles
+flux.network_creator = get_creator(0.5)
+
+u, v = @curve p linspace(0,0.5,11) begin
+    flux.network_creator = get_creator(p)
+    fit!(fluxM)
+    err(fluxM, test, loss=rmsl)
+end
+
+p = u[indmin(v)] # 
+
+flux.n=200
+fit!(fluxM)
+@test abs(err(fluxM, test, loss=rmsl) - 0.14) < 0.3
+
 
 
