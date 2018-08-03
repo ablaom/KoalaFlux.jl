@@ -1,7 +1,8 @@
 module KoalaFlux 
 
 # new:
-export FluxRegressor # eg, RidgeRegressor
+export FluxRegressor 
+export CategoricalEmbedder
 
 # needed in this module:
 import Koala: Regressor, Classifier, softwarn, BaseType, rms
@@ -10,6 +11,7 @@ import DataFrames: eltypes, AbstractDataFrame, head
 import KoalaTransforms: Transformer, TransformerMachine, ChainTransformer
 import KoalaTransforms: MakeCategoricalsIntTransformer, Standardizer
 import KoalaTransforms: RegressionTargetTransformer
+import KoalaTransforms: ToIntScheme, ToIntTransformer
 import Flux
 import StatsBase
 
@@ -34,6 +36,8 @@ import Koala: transform, inverse_transform
 
 
 ## HELPERS
+
+A ⊂ B = issubset(A, B)
 
 Base.isempty(chain::Flux.Chain) = isempty(chain.layers)
 
@@ -246,12 +250,15 @@ function fit(model::FluxRegressor, cache, add, parallel, verbosity; args...)
                 l1_penalty += sum(x->vecnorm(x, 1), cache.embedding)
             end
             l += model.lambda*(model.alpha*l1_penalty + (1 - model.alpha)*l2_penalty)
-            Flux.back!(l)
-            for p in cache.embedding
-                Flux.Tracker.update!(p, -model.learning_rate*Flux.Tracker.grad(p))
-            end
-            for p in chain_params
-                Flux.Tracker.update!(p, -model.learning_rate*Flux.Tracker.grad(p))
+            # some loss functions are not differentiable at zero, so:
+            if abs(l) > eps(Float64)
+                Flux.back!(l)
+                for p in cache.embedding
+                    Flux.Tracker.update!(p, -model.learning_rate*Flux.Tracker.grad(p))
+                end
+                for p in chain_params
+                    Flux.Tracker.update!(p, -model.learning_rate*Flux.Tracker.grad(p))
+                end
             end
         end
     end
@@ -284,15 +291,110 @@ function predict(model::FluxRegressor, predictor::FluxPredictorType,
 end
 
 
-## EXTRA HIGH-LEVEL API METHODS
+## FEATURE EMBEDDING TRANSFORMS
 
-mutable struct EntityEmbedding <: Transformer
-    flux_machine::SupervisedMachine
-    features::Symbol
+# Here we define transforms to embed the categorical features in some
+# DataFrame into the multidemsional continous variables learned by a
+# Flux neural network.
+
+mutable struct CategoricalEmbedder <: Transformer
+    flux_machine::SupervisedMachine{FluxPredictorType, FluxRegressor}
+    features::Vector{Symbol}
+end
+
+CategoricalEmbedder(machine::SupervisedMachine{FluxPredictorType, FluxRegressor};
+                    features = Symbol[]) = CategoricalEmbedder(machine, features)
+CategoricalEmbedder() =
+    error("You must give `CategoricalEmbedder` a `FluxMachine` argument to instantiate it.")
+
+struct CategoricalEmbedderScheme <: BaseType
+    features::Vector{Symbol}
+    to_int_transformer::ToIntTransformer
+    to_int_scheme_given_feature::Dict{Symbol,ToIntScheme}
+    embedding_given_feature::Dict{Symbol,Matrix{Float64}}
+end
+
+function fit(transformer::CategoricalEmbedder,
+             X::AbstractDataFrame, parallel, verbosity)
+
+    _, nominal = ordinal_nominal_features(X)
+
+    if isempty(transformer.features)
+        features = nominal
+    else
+        features = transformer.features
+    end
+    
+    flux_nominals = transformer.flux_machine.scheme_X[end].nominal_features
+    Set(features) ⊂ Set(flux_nominals) ||
+        throw(DimensionMismatch("Encountered categorical "*
+                                "not appearing in `FluxRegressor` object."))
+
+    
+    to_int_scheme_given_feature = Dict{Symbol,ToIntScheme}()
+    embedding_given_feature = Dict{Symbol,Matrix{Float64}}()
+
+    machine = transformer.flux_machine
+    scheme = machine.scheme_X[end]
+    to_int_schemes =
+        scheme.make_categoricals_int_transformer_machine.scheme.schemes
+    to_int_transformer =
+        scheme.make_categoricals_int_transformer_machine.scheme.to_int_transformer
+    
+    for j in eachindex(flux_nominals)
+        if flux_nominals[j] in features
+            ftr = flux_nominals[j]
+            to_int_scheme_given_feature[ftr] =
+                to_int_schemes[j]
+            embedding_given_feature[ftr] =
+                machine.report[:embedding][j].data
+        end
+    end
+    
+    return CategoricalEmbedderScheme(features, to_int_transformer,
+                                     to_int_scheme_given_feature,
+                                     embedding_given_feature)
+end
+
+# Will use the following to get the `kth` component of the emedding
+# vector for raw value `x` of feature `ftr`. Will work just as well if
+# `x` is replaced with a vector of categorical values, returning a
+# Float64 vector.
+function transform(scheme::CategoricalEmbedderScheme, ftr::Symbol, k::Int, x)
+    x_as_int = transform(scheme.to_int_transformer,
+                         scheme.to_int_scheme_given_feature[ftr], x)
+    return scheme.embedding_given_feature[ftr][k,x_as_int]
+end
+
+function transform(transformer::CategoricalEmbedder, scheme, X::AbstractDataFrame)
+    
+    _, nominals = ordinal_nominal_features(X)
+    without_embedding = setdiff(Set(nominals), Set(scheme.features))
+    if !isempty(without_embedding) 
+        warn("No embeddings found for the following categorical features: ")
+        for ftr in without_embedding
+            println(ftr)
+        end
+    end
+
+    Xout = X[:,:] # copy of X, working even if X is subdataframe
+    for ftr in intersect(Set(nominals),Set(scheme.features))
+        n_levels = scheme.to_int_scheme_given_feature[ftr].n_levels
+        for k in 1:n_levels
+            subftr = Symbol(string(ftr,"__",k))
+            # in the (rare) case subft is not a new feature label:
+            while subftr in names(Xout)
+                subftr = Symbol(string(subftr,"_"))
+            end
+            Xout[subftr] = transform(scheme, ftr, k, X[ftr])
+        end
+        delete!(Xout, ftr)
+    end
+
+    return Xout
+
 end
 
 
-
-        
 end # of module
 
