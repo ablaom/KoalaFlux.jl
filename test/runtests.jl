@@ -37,7 +37,7 @@ embedding = [A1, A2]
     [1.2, 2.3, 4.3, 5.6, 2.0, 4.0, 5.0, 1.0, 0.0]
 
 X, y = load_ames()
-train, test = split(eachindex(y), 0.7)
+train, test = partition(eachindex(y), 0.7)
 flux = FluxRegressor()
 flux.n = 3
 flux.learning_rate = 0.002

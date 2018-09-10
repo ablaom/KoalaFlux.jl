@@ -13,7 +13,6 @@ import KoalaTransforms: MakeCategoricalsIntTransformer, Standardizer
 import KoalaTransforms: RegressionTargetTransformer
 import KoalaTransforms: ToIntScheme, ToIntTransformer
 import Flux
-import StatsBase
 
 # to be extended (but not explicitly rexported):
 import Koala: setup, fit, predict
@@ -73,6 +72,8 @@ end
 
 # type of matrix for embedding a single nominal feature:
 EmbType = Flux.TrackedArray{Float64,2,Array{Float64,2}}
+ChainParamType = Union{Flux.TrackedArray{Float64,2,Array{Float64,2}},
+                       Flux.TrackedArray{Float64,1,Array{Float64,1}}}
 
 FluxPredictorType = Tuple{Vector{EmbType},Flux.Chain}
 
@@ -80,6 +81,7 @@ mutable struct FluxRegressor <: Regressor{FluxPredictorType}
     network_creator::Function
     dimension_formula::Function
     learning_rate::Float64
+    inertia::Float64
     lambda::Float64
     alpha::Float64 
     n::Int
@@ -88,8 +90,10 @@ end
 # keyword constructor:
 function FluxRegressor(; network_creator=default_creator,
                        dimension_formula=default_formula,
-                       lambda = 1e-5, alpha=0.0, learning_rate=0.001, n=20)
-    model = FluxRegressor(network_creator, dimension_formula, learning_rate, lambda, alpha, n)
+                       lambda = 1e-5, alpha=0.0, learning_rate=0.001,
+                       inertia=0.9, n=20)
+    model = FluxRegressor(network_creator, dimension_formula, learning_rate,
+                          inertia, lambda, alpha, n)
     softwarn(clean!(model)) 
     return model
 end
@@ -99,6 +103,10 @@ function clean!(model::FluxRegressor)
     if model.alpha > 1 || model.alpha < 0
         message = message*"alpha must be in range [0, 1]. Resetting to 0.0. "
         model.alpha = 0.0
+    end
+    if model.inertia > 1 || model.inertia < 0
+        message = message*"inertia must be in range [0, 1]. Resetting to 0.0. "
+        model.inertia = 0.0
     end
     return message
 end
@@ -204,7 +212,7 @@ function fit(model::FluxRegressor, cache, add, parallel, verbosity; args...)
         cache.embedding = Array{EmbType}(length(cache.nominal_features))
         schemes=cache.make_categoricals_int_transformer_machine.scheme.schemes
         dimensions = Int[]
-        if verbosity >= 0
+        if verbosity >= 1
             info("")
             info("Categorical feature embeddings:")
             info("  feature     \t| embedding dimension")
@@ -228,45 +236,80 @@ function fit(model::FluxRegressor, cache, add, parallel, verbosity; args...)
 
     Flux.testmode!(cache.chain, false)
     
+    embed_params = cache.embedding
     chain_params = Flux.params(cache.chain)
 
     ntrain = length(cache.y)
     train = 1:ntrain
 
     verbosity < 1 || println()
+
+    # Note: In our terminology a "momentum" is a "moving average"
+    # estimate of gradient.
+
+    # initialize vectors of momenta:
+    embed_momenta = Array{Array{Float64,2}}(length(embed_params))
+    chain_momenta = Array{Union{Array{Float64,1},
+                                Array{Float64,2}}}(length(chain_params))
+    for k in eachindex(embed_params)
+        p = embed_params[k]
+        embed_momenta[k] = zeros(size(p))
+    end
+    for k in eachindex(chain_params)
+        p = chain_params[k]
+        chain_momenta[k] = zeros(size(p))
+    end
     
+    η = model.learning_rate
+    β = model.inertia
+
     for eon in 1:model.n
         verbosity < 1 || print("\rTraining eon number: $eon   ")
-        scrambled_train = StatsBase.sample(train, ntrain, replace=false)
+        scrambled_train = shuffle(train)
         for i in scrambled_train
             ordinals = cache.X.ordinal[:,i]
             nominals = cache.X.nominal[:,i]
-            input_vector = x(cache.embedding, ordinals, nominals)
+            input_vector = x(embed_params, ordinals, nominals)
+#            @show input_vector
             l = rms(cache.chain(input_vector), cache.y[i])
+#            @show cache.y[i]
+#            @show chain_params
+#            @show cache.chain(input_vector)
+#            @show l
             l2_penalty = sum(vecnorm, chain_params)
+#            @show l2_penalty
             l1_penalty = sum(x->vecnorm(x, 1), chain_params)
-            if !isempty(cache.embedding)
-                l2_penalty += sum(vecnorm, cache.embedding)
-                l1_penalty += sum(x->vecnorm(x, 1), cache.embedding)
+#            @show l1_penalty
+            if !isempty(embed_params)
+                l2_penalty += sum(vecnorm, embed_params)
+                l1_penalty += sum(x->vecnorm(x, 1), embed_params)
             end
             l += model.lambda*(model.alpha*l1_penalty + (1 - model.alpha)*l2_penalty)
+            !isnan(l) || error("A NaN loss encountered.") 
             # some loss functions are not differentiable at zero, so:
             if abs(l) > eps(Float64)
+#                @show l
                 Flux.back!(l)
-                for p in cache.embedding
-                    Flux.Tracker.update!(p, -model.learning_rate*Flux.Tracker.grad(p))
+                for k in eachindex(embed_params)
+                    p = embed_params[k]
+                    embed_momenta[k] =  β*embed_momenta[k] +
+                        (1 - β)*Flux.Tracker.grad(p)
+                    Flux.Tracker.update!(p, -η*embed_momenta[k])
                 end
-                for p in chain_params
-                    Flux.Tracker.update!(p, -model.learning_rate*Flux.Tracker.grad(p))
+                for k in eachindex(chain_params)
+                    p = chain_params[k]
+                    chain_momenta[k] =  β*chain_momenta[k] +
+                        (1 - β)*Flux.Tracker.grad(p)
+                    Flux.Tracker.update!(p, -η*chain_momenta[k])
                 end
             end
         end
     end
 
     report = Dict{Symbol,Any}()
-    report[:embedding] = cache.embedding
+    report[:embedding] = embed_params
 
-    predictor = (cache.embedding, cache.chain)
+    predictor = (embed_params, cache.chain)
 
     return predictor, report, cache
 
@@ -294,7 +337,7 @@ end
 ## FEATURE EMBEDDING TRANSFORMS
 
 # Here we define transforms to embed the categorical features in some
-# DataFrame into the multidemsional continous variables learned by a
+# DataFrame into the multidimensional continuous variables learned by a
 # Flux neural network.
 
 mutable struct CategoricalEmbedder <: Transformer
