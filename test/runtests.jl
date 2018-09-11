@@ -1,10 +1,9 @@
-using Revise
 using Koala
 using KoalaFlux
 using Base.Test
 
 X, y = load_ames()
-@test KoalaFlux.ordinal_nominal_features(X) ==
+@test KoalaFlux.ordinal_categorical_features(X) ==
     (Symbol[:OverallQual, :GrLivArea, :x1stFlrSF, :TotalBsmtSF,
             :BsmtFinSF1, :LotArea, :GarageCars, :GarageArea,
             :YearRemodAdd, :YearBuilt],
@@ -13,10 +12,11 @@ X, y = load_ames()
 t = KoalaFlux.FrameToFluxInputTransformer()
 tM = Machine(t, X)
 XX = transform(tM, X[2:6,:])
-@test XX.nominal ==  [2  3  4  1  5;
-                      1  2  1  1  1]
+@test XX.categorical[2,1] ==  XX.categorical[2,3]
+@test XX.categorical[1,1] != XX.categorical[1,2]
 
-for ftr in tM.scheme.nominal_features
+
+for ftr in tM.scheme.categorical_features
     delete!(X, ftr)
 end
 t = KoalaFlux.FrameToFluxInputTransformer()
@@ -54,19 +54,12 @@ function get_creator(p)
 end
 
 flux.network_creator = get_creator(0.5)
+learning_curve(fluxM, train, test, [2,4,6])
+
+flux.embedding0 = fluxM.report[:embedding]
+flux.chain0 = fluxM.report[:chain]
 fit!(fluxM)
 
-# u, v = @curve p linspace(0,0.5,11) begin
-#     flux.network_creator = get_creator(p)
-#     fit!(fluxM)
-#     err(fluxM, test, loss=rmsl)
-# end
-
-# p = u[indmin(v)] # 
-
-# flux.n=30
-# fit!(fluxM)
-# @test abs(err(fluxM, test, loss=rmsl) - 0.14) < 0.3
 
 # tests for CategoricalEmbedder:
 

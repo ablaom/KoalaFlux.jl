@@ -27,7 +27,7 @@ import Koala: transform, inverse_transform
 # model" below. Each "chain", then, is a neural network (including
 # weights).
 
-# 2. Because a `FluxRegressor` machine allows for nominal input
+# 2. Because a `FluxRegressor` machine allows for categorical input
 # features, a FluxRegressor machine includes a chain (neural network)
 # *and* a vector of matrices ("tracked" in the sense of Flux.jl)
 # encoding the embedding, called "embedding" below. Thus a Koala
@@ -49,30 +49,30 @@ function default_creator(n_inputs)
                       Flux.Dense(n_hidden, 1))
 end
 
-function ordinal_nominal_features(X::AbstractDataFrame)
+function ordinal_categorical_features(X::AbstractDataFrame)
 
     features = names(X)
     types = eltypes(X)
     ordinal_features = Symbol[]
-    nominal_features = Symbol[]
+    categorical_features = Symbol[]
     for j in eachindex(features)
         if types[j] <: AbstractFloat
             push!(ordinal_features, features[j])
         else
-            push!(nominal_features, features[j])
+            push!(categorical_features, features[j])
         end
     end
 
-    return ordinal_features, nominal_features
+    return ordinal_features, categorical_features
 
 end
 
         
 ## MODEL TYPE DEFINITIONS
 
-# type of matrix for embedding a single nominal feature:
+# type of matrix for embedding a single categorical feature:
 EmbType = Flux.TrackedArray{Float64,2,Array{Float64,2}}
-ChainParamType = Union{Flux.TrackedArray{Float64,2,Array{Float64,2}},
+WeightsType = Union{Flux.TrackedArray{Float64,2,Array{Float64,2}},
                        Flux.TrackedArray{Float64,1,Array{Float64,1}}}
 
 FluxPredictorType = Tuple{Vector{EmbType},Flux.Chain}
@@ -83,17 +83,20 @@ mutable struct FluxRegressor <: Regressor{FluxPredictorType}
     learning_rate::Float64
     inertia::Float64
     lambda::Float64
-    alpha::Float64 
+    alpha::Float64
+    embedding0::Vector{EmbType}
+    chain0::Flux.Chain
     n::Int
 end
 
 # keyword constructor:
 function FluxRegressor(; network_creator=default_creator,
                        dimension_formula=default_formula,
-                       lambda = 1e-5, alpha=0.0, learning_rate=0.001,
-                       inertia=0.9, n=20)
+                       learning_rate=0.001,
+                       inertia=0.9, lambda = 1e-5, alpha=0.0,
+                       embedding0=EmbType[], chain0=Flux.Chain(), n=20)
     model = FluxRegressor(network_creator, dimension_formula, learning_rate,
-                          inertia, lambda, alpha, n)
+                          inertia, lambda, alpha, embedding0, chain0, n)
     softwarn(clean!(model)) 
     return model
 end
@@ -116,21 +119,21 @@ end
 
 struct FluxInput <: BaseType
     ordinal::Matrix{Float64}
-    nominal::Matrix{Int}
+    categorical::Matrix{Int}
 end
 
 function Base.getindex(X::KoalaFlux.FluxInput, rows::AbstractVector{Int}, ::Colon)
     ordinal = isempty(X.ordinal) ? Array{Float64}(0, length(rows)) :
         getindex(X.ordinal, :, rows)
-    nominal = isempty(X.nominal) ? Array{Int}(0, length(rows)) :
-        getindex(X.nominal, :, rows)
-    return FluxInput(ordinal, nominal)
+    categorical = isempty(X.categorical) ? Array{Int}(0, length(rows)) :
+        getindex(X.categorical, :, rows)
+    return FluxInput(ordinal, categorical)
 end
 
 struct FrameToFluxInputTransformerScheme <: BaseType
     make_categoricals_int_transformer_machine::TransformerMachine
     ordinal_features::Vector{Symbol}
-    nominal_features::Vector{Symbol}
+    categorical_features::Vector{Symbol}
 end    
 
 struct FrameToFluxInputTransformer <: Transformer
@@ -142,11 +145,11 @@ function fit(transformer::FrameToFluxInputTransformer, X::AbstractDataFrame,
     make_categoricals_int_tansformer_machine =
         Machine(MakeCategoricalsIntTransformer(sorted=true), X)
     
-    ordinal_features, nominal_features = ordinal_nominal_features(X)
+    ordinal_features, categorical_features = ordinal_categorical_features(X)
 
     return FrameToFluxInputTransformerScheme(
         make_categoricals_int_tansformer_machine,
-        ordinal_features, nominal_features)
+        ordinal_features, categorical_features)
 
 end
 
@@ -154,22 +157,22 @@ function transform(transformer::FrameToFluxInputTransformer,
                    scheme, X::AbstractDataFrame)
 
     X = transform(scheme.make_categoricals_int_transformer_machine, X)
-    ordinal_features, nominal_features = ordinal_nominal_features(X)
+    ordinal_features, categorical_features = ordinal_categorical_features(X)
 
     # check X has same features as X used to fit:
     Set(ordinal_features) == Set(scheme.ordinal_features) &&
-        Set(nominal_features) == Set(scheme.nominal_features) ||
+        Set(categorical_features) == Set(scheme.categorical_features) ||
         throw(DimensionMismatch("Missing or unexpected features encountered."))
 
     X_ordinal = X[scheme.ordinal_features]
-    X_nominal = X[scheme.nominal_features]
+    X_categorical = X[scheme.categorical_features]
 
     ordinal = isempty(X_ordinal) ? Array{Float64}(size(X, 2), 0) :
         transpose(Array(X_ordinal))
-    nominal = isempty(X_nominal) ? Array{Int}(size(X, 2), 0) :
-        transpose(Array(X_nominal))
+    categorical = isempty(X_categorical) ? Array{Int}(size(X, 2), 0) :
+        transpose(Array(X_categorical))
 
-    return FluxInput(ordinal, nominal)
+    return FluxInput(ordinal, categorical)
 
 end
 
@@ -183,33 +186,39 @@ mutable struct FluxCache <: BaseType
     X::FluxInput
     y::Vector{Float64}
     ordinal_features::Vector{Symbol}
-    nominal_features::Vector{Symbol}
+    categorical_features::Vector{Symbol}
     make_categoricals_int_transformer_machine::TransformerMachine
     embedding::Vector{EmbType}
     chain::Flux.Chain
-    FluxCache(X, y, ordinal_features, nominal_features, machine) =
-        new(X, y, ordinal_features, nominal_features, machine)
+    FluxCache(X, y, ordinal_features, categorical_features, machine) =
+        new(X, y, ordinal_features, categorical_features, machine)
 end
 
 setup(model::FluxRegressor, Xt, yt, scheme_X, parallel, verbosity) =
-    FluxCache(Xt, yt, scheme_X[end].ordinal_features, scheme_X[end].nominal_features,
+    FluxCache(Xt, yt, scheme_X[end].ordinal_features, scheme_X[end].categorical_features,
               scheme_X[end].make_categoricals_int_transformer_machine)
 
 
 # function to concatenate vector of ordinal values with vector of
-# embedded nominal values into single vector:
-function x(embedding, ordinals, nominals)
-    embedded_nominals = vcat([embedding[j][:,nominals[j]]
+# embedded categorical values into single vector:
+function x(embedding, ordinals, categoricals)
+    embedded_categoricals = vcat([embedding[j][:,categoricals[j]]
                               for j in eachindex(embedding)]...)
-    return vcat(ordinals, embedded_nominals)
+    return vcat(ordinals, embedded_categoricals)
 end    
 
 function fit(model::FluxRegressor, cache, add, parallel, verbosity; args...)
 
     if !add
 
-        # create new embedding matrices:
-        cache.embedding = Array{EmbType}(length(cache.nominal_features))
+        # create or load initial embedding matrices:
+        if isempty(model.embedding0)
+            cache.embedding = Array{EmbType}(length(cache.categorical_features))
+        else
+            cache.embedding = model.embedding0
+        end
+        
+        # print embedding details:
         schemes=cache.make_categoricals_int_transformer_machine.scheme.schemes
         dimensions = Int[]
         if verbosity >= 1
@@ -218,18 +227,21 @@ function fit(model::FluxRegressor, cache, add, parallel, verbosity; args...)
             info("  feature     \t| embedding dimension")
             info("------------------|----------------------")
         end
-        
-        for j in eachindex(cache.nominal_features)
+        for j in eachindex(cache.categorical_features)
             n_levels = schemes[j].n_levels
             d = model.dimension_formula(n_levels)
             append!(dimensions, d)
             cache.embedding[j] = Flux.param(randn(d, n_levels))
-            verbosity < 1 || info("  $(cache.nominal_features[j]) \t| $d")
+            verbosity < 1 || info("  $(cache.categorical_features[j]) \t| $d")
         end
 
-        # create a new post-embedding network:
-        n_inputs = length(cache.ordinal_features) + sum(dimensions)
-        cache.chain = model.network_creator(n_inputs)
+        # create or load a post-embedding network:
+        if isempty(model.chain0)
+            n_inputs = length(cache.ordinal_features) + sum(dimensions)
+            cache.chain = model.network_creator(n_inputs)
+        else
+            cache.chain = model.chain0
+        end
         verbosity < 1 || info("Flux network architecture: \n  $(cache.chain)")
         
     end
@@ -268,8 +280,8 @@ function fit(model::FluxRegressor, cache, add, parallel, verbosity; args...)
         scrambled_train = shuffle(train)
         for i in scrambled_train
             ordinals = cache.X.ordinal[:,i]
-            nominals = cache.X.nominal[:,i]
-            input_vector = x(embed_params, ordinals, nominals)
+            categoricals = cache.X.categorical[:,i]
+            input_vector = x(embed_params, ordinals, categoricals)
 #            @show input_vector
             l = rms(cache.chain(input_vector), cache.y[i])
 #            @show cache.y[i]
@@ -308,6 +320,7 @@ function fit(model::FluxRegressor, cache, add, parallel, verbosity; args...)
 
     report = Dict{Symbol,Any}()
     report[:embedding] = embed_params
+    report[:chain] = cache.chain
 
     predictor = (embed_params, cache.chain)
 
@@ -325,8 +338,8 @@ function predict(model::FluxRegressor, predictor::FluxPredictorType,
     predictions = Array{Float64}(npatterns)
     for i in 1:npatterns
         ordinals = X.ordinal[:,i]
-        nominals = X.nominal[:,i]
-        input_vector = x(embedding, ordinals, nominals)
+        categoricals = X.categorical[:,i]
+        input_vector = x(embedding, ordinals, categoricals)
         predictions[i] = chain(input_vector).data[1]
     end
 
@@ -360,16 +373,16 @@ end
 function fit(transformer::CategoricalEmbedder,
              X::AbstractDataFrame, parallel, verbosity)
 
-    _, nominal = ordinal_nominal_features(X)
+    _, categorical = ordinal_categorical_features(X)
 
     if isempty(transformer.features)
-        features = nominal
+        features = categorical
     else
         features = transformer.features
     end
     
-    flux_nominals = transformer.flux_machine.scheme_X[end].nominal_features
-    Set(features) ⊂ Set(flux_nominals) ||
+    flux_categoricals = transformer.flux_machine.scheme_X[end].categorical_features
+    Set(features) ⊂ Set(flux_categoricals) ||
         throw(DimensionMismatch("Encountered categorical "*
                                 "not appearing in `FluxRegressor` object."))
 
@@ -384,9 +397,9 @@ function fit(transformer::CategoricalEmbedder,
     to_int_transformer =
         scheme.make_categoricals_int_transformer_machine.scheme.to_int_transformer
     
-    for j in eachindex(flux_nominals)
-        if flux_nominals[j] in features
-            ftr = flux_nominals[j]
+    for j in eachindex(flux_categoricals)
+        if flux_categoricals[j] in features
+            ftr = flux_categoricals[j]
             to_int_scheme_given_feature[ftr] =
                 to_int_schemes[j]
             embedding_given_feature[ftr] =
@@ -411,8 +424,8 @@ end
 
 function transform(transformer::CategoricalEmbedder, scheme, X::AbstractDataFrame)
     
-    _, nominals = ordinal_nominal_features(X)
-    without_embedding = setdiff(Set(nominals), Set(scheme.features))
+    _, categoricals = ordinal_categorical_features(X)
+    without_embedding = setdiff(Set(categoricals), Set(scheme.features))
     if !isempty(without_embedding) 
         warn("No embeddings found for the following categorical features: ")
         for ftr in without_embedding
@@ -421,7 +434,7 @@ function transform(transformer::CategoricalEmbedder, scheme, X::AbstractDataFram
     end
 
     Xout = X[:,:] # copy of X, working even if X is subdataframe
-    for ftr in intersect(Set(nominals),Set(scheme.features))
+    for ftr in intersect(Set(categoricals),Set(scheme.features))
         n_levels = scheme.to_int_scheme_given_feature[ftr].n_levels
         for k in 1:n_levels
             subftr = Symbol(string(ftr,"__",k))
