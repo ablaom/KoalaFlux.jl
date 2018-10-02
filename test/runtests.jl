@@ -1,6 +1,8 @@
 using Koala
 using KoalaFlux
-using Base.Test
+using Flux
+using Test
+import DataFrames
 
 X, y = load_ames()
 @test KoalaFlux.ordinal_categorical_features(X) ==
@@ -69,6 +71,8 @@ numbers = [1.0, 2.0, 1.0]
 yy = [-1.0, 0.0, 1.0]
 
 XX = DataFrames.DataFrame(letters=letters, numbers=numbers, weirds=weirds)
+
+flux = FluxRegressor()
 flux.n = 1
 flux.dimension_formula = x -> x
 flux.learning_rate = 0.0

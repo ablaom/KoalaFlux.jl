@@ -1,0 +1,13 @@
+name = "KoalaFlux"
+uuid = "2ef8916e-bc78-11e8-1f56-89ad80990af3"
+authors = ["Anthony D. Blaom <anthony.blaom@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
+Koala = "c4f7a666-ae2a-11e8-1374-b535b12dcbb2"
+KoalaTransforms = "3a79969e-affa-11e8-3c42-d95bc1fa1847"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

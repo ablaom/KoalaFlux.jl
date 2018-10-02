@@ -5,6 +5,8 @@ export FluxRegressor
 export CategoricalEmbedder
 
 # needed in this module:
+using LinearAlgebra
+using Random
 import Koala: Regressor, Classifier, softwarn, BaseType, rms
 import Koala: supports_ensembling, Machine, SupervisedMachine
 import DataFrames: eltypes, AbstractDataFrame, head
@@ -123,9 +125,9 @@ struct FluxInput <: BaseType
 end
 
 function Base.getindex(X::KoalaFlux.FluxInput, rows::AbstractVector{Int}, ::Colon)
-    ordinal = isempty(X.ordinal) ? Array{Float64}(0, length(rows)) :
+    ordinal = isempty(X.ordinal) ? Array{Float64}(undef, 0, length(rows)) :
         getindex(X.ordinal, :, rows)
-    categorical = isempty(X.categorical) ? Array{Int}(0, length(rows)) :
+    categorical = isempty(X.categorical) ? Array{Int}(undef, 0, length(rows)) :
         getindex(X.categorical, :, rows)
     return FluxInput(ordinal, categorical)
 end
@@ -167,10 +169,10 @@ function transform(transformer::FrameToFluxInputTransformer,
     X_ordinal = X[scheme.ordinal_features]
     X_categorical = X[scheme.categorical_features]
 
-    ordinal = isempty(X_ordinal) ? Array{Float64}(size(X, 2), 0) :
-        transpose(Array(X_ordinal))
-    categorical = isempty(X_categorical) ? Array{Int}(size(X, 2), 0) :
-        transpose(Array(X_categorical))
+    ordinal = isempty(X_ordinal) ? Array{Float64}(undef, size(X, 2), 0) :
+        transpose(convert(Array, X_ordinal))
+    categorical = isempty(X_categorical) ? Array{Int}(undef, size(X, 2), 0) :
+        transpose(convert(Array, X_categorical))
 
     return FluxInput(ordinal, categorical)
 
@@ -213,7 +215,7 @@ function fit(model::FluxRegressor, cache, add, parallel, verbosity; args...)
 
         # create or load initial embedding matrices:
         if isempty(model.embedding0)
-            cache.embedding = Array{EmbType}(length(cache.categorical_features))
+            cache.embedding = Array{EmbType}(undef, length(cache.categorical_features))
         else
             cache.embedding = model.embedding0
         end
@@ -222,17 +224,17 @@ function fit(model::FluxRegressor, cache, add, parallel, verbosity; args...)
         schemes=cache.make_categoricals_int_transformer_machine.scheme.schemes
         dimensions = Int[]
         if verbosity >= 1
-            info("")
-            info("Categorical feature embeddings:")
-            info("  feature     \t| embedding dimension")
-            info("------------------|----------------------")
+            @info "\n"
+            @info "Categorical feature embeddings:"
+            @info "  feature     \t| embedding dimension"
+            @info "------------------|----------------------"
         end
         for j in eachindex(cache.categorical_features)
             n_levels = schemes[j].n_levels
             d = model.dimension_formula(n_levels)
             append!(dimensions, d)
             cache.embedding[j] = Flux.param(randn(d, n_levels))
-            verbosity < 1 || info("  $(cache.categorical_features[j]) \t| $d")
+            verbosity < 1 || @info "  $(cache.categorical_features[j]) \t| $d"
         end
 
         # create or load a post-embedding network:
@@ -242,7 +244,7 @@ function fit(model::FluxRegressor, cache, add, parallel, verbosity; args...)
         else
             cache.chain = model.chain0
         end
-        verbosity < 1 || info("Flux network architecture: \n  $(cache.chain)")
+        verbosity < 1 || @info "Flux network architecture: \n  $(cache.chain)"
         
     end
 
@@ -260,9 +262,9 @@ function fit(model::FluxRegressor, cache, add, parallel, verbosity; args...)
     # estimate of gradient.
 
     # initialize vectors of momenta:
-    embed_momenta = Array{Array{Float64,2}}(length(embed_params))
+    embed_momenta = Array{Array{Float64,2}}(undef, length(embed_params))
     chain_momenta = Array{Union{Array{Float64,1},
-                                Array{Float64,2}}}(length(chain_params))
+                                Array{Float64,2}}}(undef, length(chain_params))
     for k in eachindex(embed_params)
         p = embed_params[k]
         embed_momenta[k] = zeros(size(p))
@@ -288,16 +290,16 @@ function fit(model::FluxRegressor, cache, add, parallel, verbosity; args...)
 #            @show chain_params
 #            @show cache.chain(input_vector)
 #            @show l
-            l2_penalty = sum(vecnorm, chain_params)
+            l2_penalty = sum(norm, chain_params)
 #            @show l2_penalty
-            l1_penalty = sum(x->vecnorm(x, 1), chain_params)
+            l1_penalty = sum(x->norm(x, 1), chain_params)
 #            @show l1_penalty
             if !isempty(embed_params)
-                l2_penalty += sum(vecnorm, embed_params)
-                l1_penalty += sum(x->vecnorm(x, 1), embed_params)
+                l2_penalty += sum(norm, embed_params)
+                l1_penalty += sum(x->norm(x, 1), embed_params)
             end
             l += model.lambda*(model.alpha*l1_penalty + (1 - model.alpha)*l2_penalty)
-            !isnan(l) || error("A NaN loss encountered.") 
+            !isnan(l) || @error "A NaN loss encountered."
             # some loss functions are not differentiable at zero, so:
             if abs(l) > eps(Float64)
 #                @show l
@@ -335,7 +337,7 @@ function predict(model::FluxRegressor, predictor::FluxPredictorType,
     Flux.testmode!(chain)
     npatterns = size(X.ordinal, 2) 
 
-    predictions = Array{Float64}(npatterns)
+    predictions = Array{Float64}(undef, npatterns)
     for i in 1:npatterns
         ordinals = X.ordinal[:,i]
         categoricals = X.categorical[:,i]
@@ -361,7 +363,8 @@ end
 CategoricalEmbedder(machine::SupervisedMachine{FluxPredictorType, FluxRegressor};
                     features = Symbol[]) = CategoricalEmbedder(machine, features)
 CategoricalEmbedder() =
-    error("You must give `CategoricalEmbedder` a `FluxMachine` argument to instantiate it.")
+    @error "You must give `CategoricalEmbedder` a `FluxMachine` 
+         argument to instantiate it."
 
 struct CategoricalEmbedderScheme <: BaseType
     features::Vector{Symbol}
@@ -427,7 +430,7 @@ function transform(transformer::CategoricalEmbedder, scheme, X::AbstractDataFram
     _, categoricals = ordinal_categorical_features(X)
     without_embedding = setdiff(Set(categoricals), Set(scheme.features))
     if !isempty(without_embedding) 
-        warn("No embeddings found for the following categorical features: ")
+        @warn "No embeddings found for the following categorical features: "
         for ftr in without_embedding
             println(ftr)
         end
