@@ -1,4 +1,4 @@
-module KoalaFlux 
+module KoalaFlux
 
 # new:
 export FluxRegressor 
@@ -199,7 +199,6 @@ end
 setup(model::FluxRegressor, Xt, yt, scheme_X, parallel, verbosity) =
     FluxCache(Xt, yt, scheme_X[end].ordinal_features, scheme_X[end].categorical_features,
               scheme_X[end].make_categoricals_int_transformer_machine)
-
 
 # function to concatenate vector of ordinal values with vector of
 # embedded categorical values into single vector:
